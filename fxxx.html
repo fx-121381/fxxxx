@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title></title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: #000;
+        color: #fff;
+        font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto;
+        overflow: hidden;
+      }
+
+      .toasts {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 9999;
+      }
+
+      /* 卡片：去掉 backdrop-filter、弱化阴影、避免 text-shadow（这些会很重） */
+      .toast {
+        position: absolute;
+        min-width: 220px;
+        max-width: 340px;
+        min-height: 84px;
+        padding: 14px 16px;
+        border-radius: 14px;
+        font-weight: 500;
+        font-size: 15px;
+        line-height: 1.5;
+        color: #111;
+        background: linear-gradient(135deg, #fceabb 0%, #f8b500 100%);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28); /* 轻微阴影，不要太大 */
+        pointer-events: auto;
+        opacity: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        /* 入场用短动画，后续漂浮用 transform-only 循环（GPU） */
+        animation: enter 300ms cubic-bezier(0.2, 0.9, 0.2, 1) forwards;
+        will-change: transform, opacity;
+        transform: translate3d(0, 0, 0);
+      }
+
+      .toast-header {
+        font-weight: 700;
+        font-size: 13px;
+        color: rgba(0, 0, 0, 0.6);
+        padding-bottom: 4px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+      }
+      .toast-body {
+        font-size: 15px;
+        color: rgba(0, 0, 0, 0.85);
+      }
+
+      /* 入场（opacity + transform）——短暂 */
+      @keyframes enter {
+        from {
+          opacity: 0;
+          transform: translate3d(0, 10px, 0) scale(0.99) rotate(-0.6deg);
+        }
+        to {
+          opacity: 1;
+          transform: translate3d(0, 0, 0) scale(1) rotate(0);
+        }
+      }
+
+      /* 漂浮（只用 transform）——通过 inline style 设置周期与幅度 */
+      @keyframes floatY {
+        0% {
+          transform: translate3d(0, 0, 0);
+        }
+        50% {
+          transform: translate3d(0, -12px, 0);
+        }
+        100% {
+          transform: translate3d(0, 0, 0);
+        }
+      }
+
+      @media (max-width: 520px) {
+        .toast {
+          min-width: 160px;
+          max-width: 260px;
+          min-height: 64px;
+          padding: 10px 12px;
+          border-radius: 12px;
+          font-size: 13px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="toasts" class="toasts"></div>
+
+    <script>
+      /*
+  说明：
+  - spawnInterval: 生成间隔（ms）。之前你要求 200ms / 100ms，现在保留参数可调。
+  - maxOnScreen: 最大同时存在卡片数。推荐在桌面环境设 60~150；手机设 30~60。
+  - 实现策略：active 是队列（数组）按顺序保存当前显示的 DOM 节点。
+    当 active.length < maxOnScreen 时创建新节点；否则复用 active.shift()（最旧节点）
+    —— 直接更新它的位置/内容/样式并 push 回数组。这样 DOM 数量稳定为 maxOnScreen。
+*/
+
+      (function () {
+        const messages = [
+          "今天也要好好吃饭哦。",
+          "多喝水，少熬夜。",
+          "抬头看看天，放松一下眼睛。",
+          "别太焦虑，一切会慢慢好起来。",
+          "你真的很棒，坚持住。",
+          "记得多休息，别累坏自己。",
+          "开心点，你值得快乐。",
+          "有点困了就早点睡吧。",
+          "继续加油，未来可期。",
+          "深呼吸，慢下来，给自己空间。",
+        ];
+
+        const gradients = [
+          "linear-gradient(135deg,#fceabb 0%,#f8b500 100%)",
+          "linear-gradient(135deg,#a1c4fd 0%,#c2e9fb 100%)",
+          "linear-gradient(135deg,#89f7fe 0%,#66a6ff 100%)",
+          "linear-gradient(135deg,#fddb92 0%,#d1fdff 100%)",
+          "linear-gradient(135deg,#ffecd2 0%,#fcb69f 100%)",
+          "linear-gradient(135deg,#e0c3fc 0%,#8ec5fc 100%)",
+          "linear-gradient(135deg,#a8edea 0%,#fed6e3 100%)",
+        ];
+
+        const root = document.getElementById("toasts");
+
+        // 可调参数（按需修改）
+        let spawnInterval = 200; // ms，改小会更快但更占资源
+        const maxOnScreen = Math.min(
+          120,
+          Math.max(30, Math.floor(window.innerWidth / 10))
+        ); // 自动建议值
+        // 说明：maxOnScreen 保持在 30~120 之间（随屏幕宽度略微调整）
+
+        // 队列：当前活跃的 toast 节点（按时间顺序）
+        const active = [];
+
+        function rand(min, max) {
+          return Math.floor(Math.random() * (max - min + 1)) + min;
+        }
+        function pick() {
+          return messages[Math.floor(Math.random() * messages.length)];
+        }
+
+        function getPosition() {
+          const w = window.innerWidth,
+            h = window.innerHeight;
+          const x = rand(16, Math.max(80, w - 260));
+          const y = rand(16, Math.max(80, h - 140));
+          return { x, y };
+        }
+
+        // 创建新节点（仅在 active.length < maxOnScreen 时调用）
+        function buildNode() {
+          const el = document.createElement("div");
+          el.className = "toast";
+          // body/header 结构，复用时直接更新 textContent
+          const header = document.createElement("div");
+          header.className = "toast-header";
+          header.textContent = "温馨提示";
+          const body = document.createElement("div");
+          body.className = "toast-body";
+          el.appendChild(header);
+          el.appendChild(body);
+          // 让漂浮动画的参数可单独控制（duration, delay, distance）
+          return { el, header, body };
+        }
+
+        // 复用或新建节点，然后 push 到 active 队列尾
+        function spawnToast(text) {
+          let nodeObj;
+          if (active.length < maxOnScreen) {
+            nodeObj = buildNode();
+            root.appendChild(nodeObj.el);
+          } else {
+            // 复用最旧的节点（队头）
+            nodeObj = active.shift(); // nodeObj 之前就是 {el, header, body}
+            // 移除之前可能的 inline 动画延迟，重置 transform/opacity
+            nodeObj.el.style.animation = "none";
+            // force reflow to restart animation (小技巧)
+            // eslint-disable-next-line
+            void nodeObj.el.offsetWidth;
+            nodeObj.el.style.opacity = "1";
+          }
+
+          // 更新内容与样式
+          nodeObj.body.textContent = text;
+          nodeObj.el.style.background =
+            gradients[rand(0, gradients.length - 1)];
+
+          // 随机位置
+          const pos = getPosition();
+          nodeObj.el.style.left = pos.x + "px";
+          nodeObj.el.style.top = pos.y + "px";
+
+          // 设置单独的漂浮周期、幅度、相位（通过 inline animation property）
+          const floatMs = rand(3200, 6400);
+          const floatDelay = rand(0, 800);
+          const floatDistance = rand(6, 14); // px
+          // 使用 transform translate3d 的 keyframes：通过 CSS variable 会更复杂，直接用 inline animation with keyframes name floatY
+          // 我们用 animation 属性来控制周期与延时（keyframes floatY 已定义）
+          nodeObj.el.style.animation = `enter 300ms cubic-bezier(.2,.9,.2,1) forwards, floatY ${floatMs}ms ease-in-out ${floatDelay}ms infinite`;
+          // 但是 floatY 的范围是 -12px 固定，为微调我们调整层叠 transform（用 translate3d），这里简单调整 via scale slightly
+          // 将节点放到队尾（最新）
+          active.push(nodeObj);
+        }
+
+        // 生成控制（使用 setInterval 保持简单）
+        const timer = setInterval(() => {
+          spawnToast(pick());
+        }, spawnInterval);
+
+        // 供调试：在 console 可调用 caringToasts.stop() / .start() / .setRate(ms)
+        window.caringToasts = {
+          stop: () => {
+            clearInterval(timer);
+          },
+          // quick helper：降低速率
+          setRate(ms) {
+            spawnInterval = ms;
+            // note: 对已经创建的 setInterval 无法直接替换（这里为了简短演示），如果需要动态修改请重写 timer 管理逻辑
+            console.info(
+              "已设置 spawnInterval =",
+              ms,
+              "（需要刷新页面以生效当前实现）"
+            );
+          },
+          activeCount: () => active.length,
+          maxOnScreen,
+        };
+
+        // 说明：若你想让复用时也改变漂浮幅度等更细化，可把 nodeObj 保存为对象并更新 css 变量
+      })();
+    </script>
+  </body>
+</html>
